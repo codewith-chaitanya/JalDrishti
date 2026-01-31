@@ -1,36 +1,58 @@
 import pandas as pd
-from sklearn.feature_extraction.text import CountVectorizer
+import numpy as np
+from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.ensemble import IsolationForest
 from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
 
 def analyze_edna(df: pd.DataFrame):
-    # --- STEP 1: PREPARE THE DATA ---
-    # We use "K-mers" (substrings of length 3) to turn DNA strings into numbers.
-    # Example: "ATCG" becomes counts of [ATC, TCG, ...]
-    vectorizer = CountVectorizer(analyzer='char', ngram_range=(3, 3))
+    # --- STEP 1: ROBUST DATA PREPARATION ---
+    # Use TfidfVectorizer instead of CountVectorizer. 
+    # This normalizes the length so longer sequences don't bias the model.
+    vectorizer = TfidfVectorizer(analyzer='char', ngram_range=(3, 3))
     
-    # Convert the 'Sequence' column into a matrix of numbers
-    X = vectorizer.fit_transform(df['Sequence']).toarray()
+    try:
+        # BUG FIX: Remove .toarray() if possible, but for IsolationForest we need it.
+        # We handle potential memory errors here.
+        X_sparse = vectorizer.fit_transform(df['Sequence'])
+        X = X_sparse.toarray() 
+    except KeyError:
+        raise ValueError("The CSV must contain a 'Sequence' column.")
 
-    # --- STEP 2: DETECT ANOMALIES ---
-    # Isolation Forest isolates observations by randomly selecting a feature.
-    # Anomalies are easier to isolate (shorter path), so they get a score of -1.
-    model = IsolationForest(contamination=0.1, random_state=42)
-    df['anomaly_score'] = model.fit_predict(X)
+    # --- STEP 2: SCALING (Crucial for PCA) ---
+    # Standardize features by removing the mean and scaling to unit variance.
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
 
-    # Label them: -1 is "New Organism", 1 is "Known Species"
-    df['status'] = df['anomaly_score'].apply(lambda x: 'New Organism' if x == -1 else 'Known Species')
+    # --- STEP 3: ANOMALY DETECTION ---
+    # We increase n_estimators for better stability.
+    # Contamination=0.1 assumes 10% are anomalies.
+    model = IsolationForest(
+        n_estimators=200, 
+        contamination=0.1, 
+        random_state=42,
+        n_jobs=-1 # Use all CPU cores for speed
+    )
+    
+    # Predict and map results
+    preds = model.fit_predict(X_scaled)
+    df['status'] = np.where(preds == -1, 'New Organism', 'Known Species')
+    
+    # Add a confidence score (Decision Function)
+    # Lower scores = more anomalous
+    df['anomaly_confidence'] = model.decision_function(X_scaled).round(4)
 
-    # --- STEP 3: SIMPLIFY FOR VISUALIZATION (PCA) ---
-    # Reduce the complex matrix X into just 2 numbers (x, y) so we can plot it.
+    # --- STEP 4: STABILIZED VISUALIZATION ---
+    # Use PCA on the scaled data for a much more accurate 2D map.
     pca = PCA(n_components=2)
-    coords = pca.fit_transform(X)
+    coords = pca.fit_transform(X_scaled)
     
-    df['pca_x'] = coords[:, 0]
-    df['pca_y'] = coords[:, 1]
+    df['pca_x'] = coords[:, 0].round(4)
+    df['pca_y'] = coords[:, 1].round(4)
 
-    # Clean up: remove the raw score column before sending to frontend
-    del df['anomaly_score']
+    # --- STEP 5: OPTIMIZATION ---
+    # Drop raw Sequence from the response to save bandwidth (it's already in the CSV)
+    # Keep it if your frontend specifically needs to display the string.
+    # result_df = df.drop(columns=['Sequence']) 
 
-    # Convert to a dictionary (JSON format)
     return df.to_dict(orient='records')
