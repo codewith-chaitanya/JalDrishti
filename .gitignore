@@ -1,0 +1,12 @@
+# Python Ignore
+venv/
+__pycache__/
+*.pyc
+
+# Node/React Ignore
+node_modules/
+dist/
+.env
+
+# System Ignore
+.DS_Store
